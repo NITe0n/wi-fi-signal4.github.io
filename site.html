@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WiFi Mapper Pro</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html-to-image/1.11.11/html-to-image.min.js"></script>
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&display=swap');
+        
+        body { 
+            font-family: 'Google Sans', sans-serif;
+            background-color: #1e1f20;
+            color: #e3e3e3;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        .custom-scroll::-webkit-scrollbar { width: 6px; }
+        .custom-scroll::-webkit-scrollbar-track { background: transparent; }
+        .custom-scroll::-webkit-scrollbar-thumb { background: #3c4043; border-radius: 10px; }
+
+        .map-viewport {
+            touch-action: none;
+            background-image: radial-gradient(#333537 1px, transparent 1px);
+            background-size: 30px 30px;
+        }
+
+        .gemini-card {
+            background: #131314;
+            border: 1px solid #444746;
+            transition: all 0.2s;
+        }
+        .gemini-card:hover { border-color: #5f6368; }
+        .gemini-card.selected { border-color: #a8c7fa; background: #1e1f20; }
+
+        .point-input {
+            background: transparent;
+            border-bottom: 1px solid #444746;
+            outline: none;
+            color: #a8c7fa;
+            font-weight: bold;
+            font-size: 1.1rem;
+        }
+        .point-input:focus { border-bottom-color: #a8c7fa; }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(5px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-in { animation: fadeIn 0.3s ease-out; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useCallback, useRef, useEffect } = React;
+
+        const Icon = ({ name, size = 20, className = "" }) => {
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [name]);
+            return <i data-lucide={name} style={{width: size, height: size}} className={className}></i>;
+        };
+
+        const App = () => {
+            const [image, setImage] = useState(null);
+            const [points, setPoints] = useState([]);
+            const [selectedId, setSelectedId] = useState(null);
+            
+            // Камера
+            const [scale, setScale] = useState(1);
+            const [pos, setPos] = useState({ x: 0, y: 0 });
+            const [isPanning, setIsPanning] = useState(false);
+            
+            const mapRef = useRef(null);
+            const containerRef = useRef(null);
+            const lastMousePos = useRef({ x: 0, y: 0 });
+
+            // Загрузка фото
+            const onUpload = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    setImage(ev.target.result);
+                    setPoints([]);
+                    setScale(1);
+                    setPos({ x: 50, y: 50 }); // Центрируем примерно
+                };
+                reader.readAsDataURL(file);
+            };
+
+            // Зум
+            const handleWheel = (e) => {
+                e.preventDefault();
+                const delta = e.deltaY > 0 ? 0.9 : 1.1;
+                setScale(s => Math.min(Math.max(s * delta, 0.1), 8));
+            };
+
+            // Перемещение (Правая кнопка или Колесо)
+            const handleMouseDown = (e) => {
+                if (e.button === 2 || e.button === 1) {
+                    setIsPanning(true);
+                    lastMousePos.current = { x: e.clientX, y: e.clientY };
+                }
+            };
+
+            const handleMouseMove = (e) => {
+                if (isPanning) {
+                    const dx = e.clientX - lastMousePos.current.x;
+                    const dy = e.clientY - lastMousePos.current.y;
+                    setPos(prev => ({ x: prev.x + dx, y: prev.y + dy }));
+                    lastMousePos.current = { x: e.clientX, y: e.clientY };
+                }
+            };
+
+            const handleMouseUp = () => setIsPanning(false);
+
+            // Добавление точки (Левый клик)
+            const handleMapClick = (e) => {
+                if (e.button !== 0 || isPanning || !image) return;
+                if (e.target.closest('.map-pin-unit')) return; // Не ставим точку поверх другой
+
+                const rect = mapRef.current.getBoundingClientRect();
+                const x = ((e.clientX - rect.left) / rect.width) * 100;
+                const y = ((e.clientY - rect.top) / rect.height) * 100;
+
+                const newId = points.length > 0 ? Math.max(...points.map(p => p.id)) + 1 : 1;
+                const newPoint = { id: newId, x, y, dbm: '' };
+                setPoints([...points, newPoint]);
+                setSelectedId(newId);
+            };
+
+            const handleExport = async () => {
+                if (points.length === 0) return;
+                
+                // Excel
+                const ws = XLSX.utils.json_to_sheet(points.map(p => ({ "ID": p.id, "Signal (dBm)": p.dbm || "N/A" })));
+                const wb = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(wb, ws, "WiFi Data");
+                XLSX.writeFile(wb, "wifi-survey.xlsx");
+
+                // PNG
+                const dataUrl = await htmlToImage.toPng(mapRef.current);
+                const link = document.createElement('a');
+                link.download = 'wifi-map.png';
+                link.href = dataUrl;
+                link.click();
+            };
+
+            return (
+                <div className="flex h-screen w-screen bg-[#1e1f20] text-[#e3e3e3] overflow-hidden" onContextMenu={(e) => e.preventDefault()}>
+                    
+                    {/* Левая панель (Минимализм) */}
+                    <aside className="w-20 bg-[#131314] flex flex-col items-center py-6 border-r border-[#444746] z-50">
+                        <div className="w-12 h-12 bg-blue-600 rounded-2xl flex items-center justify-center text-white shadow-lg mb-8">
+                            <Icon name="zap" size={28} />
+                        </div>
+                        <div className="flex-1 space-y-6">
+                            <div className="text-[#a8c7fa] cursor-default" title="Карта активна">
+                                <Icon name="map" size={24} />
+                            </div>
+                        </div>
+                    </aside>
+
+                    {/* Центр: Карта */}
+                    <main 
+                        className="flex-1 relative map-viewport overflow-hidden"
+                        onWheel={handleWheel}
+                        onMouseDown={handleMouseDown}
+                        onMouseMove={handleMouseMove}
+                        onMouseUp={handleMouseUp}
+                        onClick={handleMapClick}
+                    >
+                        {!image ? (
+                            <div className="h-full flex flex-col items-center justify-center">
+                                <h1 className="text-5xl font-medium mb-8 tracking-tight">WiFi Mapper Pro</h1>
+                                <label className="group flex flex-col items-center gap-4 p-12 rounded-[40px] border-2 border-dashed border-[#444746] hover:border-[#a8c7fa] transition-all cursor-pointer bg-[#131314]/50">
+                                    <div className="w-16 h-16 rounded-full bg-[#333537] flex items-center justify-center group-hover:scale-110 transition-transform">
+                                        <Icon name="upload-cloud" size={32} />
+                                    </div>
+                                    <span className="text-xl text-[#8e918f]">Загрузите план этажа</span>
+                                    <input type="file" className="hidden" onChange={onUpload} accept="image/*" />
+                                </label>
+                            </div>
+                        ) : (
+                            <div 
+                                ref={mapRef}
+                                className="absolute"
+                                style={{ 
+                                    transform: `translate(${pos.x}px, ${pos.y}px) scale(${scale})`,
+                                    transformOrigin: '0 0',
+                                    transition: isPanning ? 'none' : 'transform 0.1s ease-out'
+                                }}
+                            >
+                                <img src={image} className="block max-h-[90vh] w-auto pointer-events-none select-none rounded shadow-2xl" />
+                                {points.map(p => (
+                                    <div 
+                                        key={p.id}
+                                        onClick={(e) => { e.stopPropagation(); setSelectedId(p.id); }}
+                                        style={{ left: `${p.x}%`, top: `${p.y}%` }}
+                                        className={`map-pin-unit absolute -translate-x-1/2 -translate-y-1/2 w-8 h-8 rounded-full flex items-center justify-center border-2 transition-all cursor-pointer z-20 ${
+                                            selectedId === p.id 
+                                            ? 'bg-[#a8c7fa] border-white text-[#062e6f] scale-125 ring-4 ring-blue-500/20' 
+                                            : 'bg-[#131314] border-[#a8c7fa] text-[#a8c7fa] hover:scale-110'
+                                        }`}
+                                    >
+                                        <span className="text-[10px] font-bold">{p.id}</span>
+                                        {p.dbm && (
+                                            <div className="absolute top-9 bg-[#131314] text-[10px] px-2 py-0.5 rounded border border-[#444746] whitespace-nowrap shadow-xl">
+                                                {p.dbm} dBm
+                                            </div>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {/* Хинт внизу */}
+                        {image && (
+                            <div className="absolute bottom-6 left-6 bg-[#131314]/80 backdrop-blur px-4 py-2 rounded-full border border-[#444746] text-xs text-[#8e918f] pointer-events-none">
+                                ЛКМ: поставить точку | ПКМ или Колесо: двигать карту | Zoom: колесо
+                            </div>
+                        )}
+                    </main>
+
+                    {/* Правая панель: Список точек */}
+                    {image && (
+                        <aside className="w-80 bg-[#131314] border-l border-[#444746] flex flex-col z-50 animate-in">
+                            <div className="p-6 border-b border-[#444746] flex items-center justify-between">
+                                <h2 className="text-lg font-medium">Измерения</h2>
+                                <span className="bg-[#333537] text-xs px-2 py-1 rounded-md text-[#a8c7fa]">{points.length}</span>
+                            </div>
+
+                            <div className="flex-1 overflow-y-auto p-4 space-y-3 custom-scroll">
+                                {points.length === 0 ? (
+                                    <div className="text-center py-20 text-[#8e918f] text-sm">
+                                        Кликните на карту, чтобы<br/>добавить первый замер
+                                    </div>
+                                ) : (
+                                    [...points].reverse().map(p => (
+                                        <div 
+                                            key={p.id}
+                                            onClick={() => setSelectedId(p.id)}
+                                            className={`gemini-card p-4 rounded-2xl flex items-center gap-4 cursor-pointer ${selectedId === p.id ? 'selected' : ''}`}
+                                        >
+                                            <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold shrink-0 ${selectedId === p.id ? 'bg-[#a8c7fa] text-[#062e6f]' : 'bg-[#1e1f20] text-[#a8c7fa]'}`}>
+                                                {p.id}
+                                            </div>
+                                            <div className="flex-1">
+                                                <div className="text-[10px] uppercase text-[#8e918f] font-bold mb-1 tracking-wider">Уровень сигнала</div>
+                                                <div className="flex items-center gap-2">
+                                                    <input 
+                                                        className="point-input w-full"
+                                                        placeholder="-65"
+                                                        type="number"
+                                                        autoFocus={selectedId === p.id}
+                                                        value={p.dbm}
+                                                        onChange={(e) => setPoints(points.map(pt => pt.id === p.id ? {...pt, dbm: e.target.value} : pt))}
+                                                    />
+                                                    <span className="text-xs text-[#8e918f]">dBm</span>
+                                                </div>
+                                            </div>
+                                            <button 
+                                                onClick={(e) => { e.stopPropagation(); setPoints(points.filter(pt => pt.id !== p.id)); }}
+                                                className="text-[#444746] hover:text-red-400 p-1"
+                                            >
+                                                <Icon name="x" size={18} />
+                                            </button>
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+
+                            <div className="p-6 bg-[#1e1f20]/50 border-t border-[#444746]">
+                                <button 
+                                    onClick={handleExport}
+                                    disabled={points.length === 0}
+                                    className="w-full bg-[#a8c7fa] hover:bg-[#d3e3fd] text-[#062e6f] py-4 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
+                                >
+                                    <Icon name="download" size={20} />
+                                    <span>Экспорт отчета</span>
+                                </button>
+                            </div>
+                        </aside>
+                    )}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
